@@ -481,6 +481,32 @@ test('a Codex source-rate-limited response retains the last known quota windows'
   runtime.stop();
 });
 
+test('a transient Codex failure marks a retained Credit value stale', async () => {
+  const results = [
+    [{
+      ...providerRow('codex', 'account', 'Plus', {
+      updatedAt: '2026-07-21T00:00:00.000Z',
+      windows: [{ kind: 'session', usedPercent: 20 }]
+      }),
+      creditBalance: '1498.57',
+      creditBalanceStatus: 'available',
+      creditBalanceUpdatedAt: '2026-07-21T00:00:00.000Z'
+    }],
+    [{ provider: 'codex', accountKey: 'account', status: 'unavailable', updatedAt: '2026-07-21T00:05:00.000Z', windows: [] }]
+  ];
+  const runtime = createLimitsRuntime({ limitProviders: ['codex'] }, runtimeDeps({
+    probeProvider: async () => results.shift()
+  }));
+
+  await runtime.refresh({ provider: 'codex' }, 'startup');
+  await runtime.refresh({ provider: 'codex' }, 'interval');
+  const row = runtime.getSnapshot().providers[0];
+  assert.equal(row.status, 'unavailable');
+  assert.equal(row.creditBalance, '1498.57');
+  assert.equal(row.creditBalanceStatus, 'stale');
+  runtime.stop();
+});
+
 test('a mixed full result marks an expected missing identity unavailable without losing its lastGood', async () => {
   const results = [
     [providerRow('mimo', 'A', 'Account A'), providerRow('mimo', 'B', 'Account B')],

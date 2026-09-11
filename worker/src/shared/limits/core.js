@@ -16,6 +16,8 @@ const VALID_ACTION_REQUIREMENTS = new Set(['accountVerification']);
 const WINDOW_ORDER = ['session', 'daily', 'weekly', 'billing'];
 const CODEX_TRANSIENT_WINDOW_RETENTION_MS = 10 * 60 * 1000;
 const CODEX_TRANSIENT_PROVIDER_STATUSES = new Set(['unavailable', 'error', 'rateLimited', 'sourceRateLimited']);
+const VALID_CREDIT_BALANCE_STATUSES = new Set(['available', 'stale', 'unavailable']);
+const CREDIT_BALANCE_DECIMAL_PATTERN = /^\d+(?:\.\d+)?$/u;
 const MAX_ACCOUNT_LABEL_INPUT_LENGTH = 256;
 const MAX_ACCOUNT_NAME_INPUT_LENGTH = 512;
 const MAX_OPENCODE_ACCOUNT_KEY_ALIASES = 8;
@@ -153,6 +155,43 @@ function normalizeDateText(value) {
 function numberOrNull(value) {
   const number = asNumber(value);
   return number === null ? null : number;
+}
+
+function normalizeCreditBalance(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return CREDIT_BALANCE_DECIMAL_PATTERN.test(normalized) ? normalized : null;
+}
+
+function normalizeCreditBalanceStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return VALID_CREDIT_BALANCE_STATUSES.has(normalized) ? normalized : '';
+}
+
+function normalizeCreditBalanceFields(input) {
+  const hasFields = Object.hasOwn(input, 'creditBalance')
+    || Object.hasOwn(input, 'creditBalanceStatus')
+    || Object.hasOwn(input, 'creditBalanceUnlimited')
+    || Object.hasOwn(input, 'creditBalanceUpdatedAt');
+  if (!hasFields) return {};
+
+  const rawBalance = normalizeCreditBalance(input.creditBalance);
+  const unlimited = input.creditBalanceUnlimited === true;
+  const hasStatus = Object.hasOwn(input, 'creditBalanceStatus');
+  const requestedStatus = normalizeCreditBalanceStatus(input.creditBalanceStatus);
+  const status = requestedStatus === 'stale'
+    ? (rawBalance !== null || unlimited ? 'stale' : 'unavailable')
+    : requestedStatus === 'available'
+      ? (unlimited || rawBalance !== null ? 'available' : 'unavailable')
+      : requestedStatus === 'unavailable'
+        ? 'unavailable'
+        : hasStatus ? 'unavailable' : (unlimited || rawBalance !== null ? 'available' : 'unavailable');
+  return {
+    creditBalance: status === 'unavailable' || unlimited ? null : rawBalance,
+    creditBalanceStatus: status,
+    creditBalanceUnlimited: status !== 'unavailable' && unlimited,
+    creditBalanceUpdatedAt: normalizeIsoTimestamp(input.creditBalanceUpdatedAt)
+  };
 }
 
 function percentFromWindow(input, used, limit) {
@@ -461,6 +500,7 @@ function normalizeLimitProvider(input) {
     windows.sort((a, b) => WINDOW_ORDER.indexOf(a.kind) - WINDOW_ORDER.indexOf(b.kind));
   }
   const balance = normalizeProviderBalance(input.balance);
+  const creditBalance = provider === 'codex' ? normalizeCreditBalanceFields(input) : {};
   const adapterId = provider === 'thirdparty' ? normalizeAdapterId(input.adapterId ?? input.adapter_id) : '';
   const usageSummary = normalizeProviderUsageSummary(input.usageSummary ?? input.usage_summary);
   // Compatibility shim: devices older than the credits-window change post a
@@ -500,6 +540,7 @@ function normalizeLimitProvider(input) {
     windows,
     balanceUsd: numberOrNull(input.balanceUsd),
     balance,
+    ...creditBalance,
     ...(usageSummary ? { usageSummary } : {}),
     resetCredits: normalizeProviderResetCredits(input.resetCredits ?? input.rateLimitResetCredits ?? input.rate_limit_reset_credits),
     region: normalizeRegion(input.region)
@@ -623,7 +664,7 @@ function cloneLimitWindows(windows) {
 }
 
 function retainedCodexProvider(previousProvider, currentProvider, windows) {
-  return {
+  const retained = {
     ...previousProvider,
     ...currentProvider,
     accountKey: currentProvider.accountKey || previousProvider.accountKey,
@@ -638,6 +679,15 @@ function retainedCodexProvider(previousProvider, currentProvider, windows) {
     windows: cloneLimitWindows(windows),
     resetCredits: currentProvider.resetCredits || previousProvider.resetCredits
   };
+  const currentHasCreditObservation = Object.hasOwn(currentProvider, 'creditBalanceStatus');
+  const previousHasCreditObservation = Object.hasOwn(previousProvider, 'creditBalanceStatus');
+  if (!currentHasCreditObservation && previousHasCreditObservation) {
+    retained.creditBalance = previousProvider.creditBalance;
+    retained.creditBalanceStatus = previousProvider.creditBalanceStatus === 'unavailable' ? 'unavailable' : 'stale';
+    retained.creditBalanceUnlimited = previousProvider.creditBalanceUnlimited === true;
+    retained.creditBalanceUpdatedAt = previousProvider.creditBalanceUpdatedAt;
+  }
+  return retained;
 }
 
 function mergeCodexProviderSnapshot(previousProvider, currentProvider) {
@@ -651,6 +701,9 @@ function mergeCodexProviderSnapshot(previousProvider, currentProvider) {
   // A successful non-empty snapshot is authoritative. Codex can legitimately
   // change percentages and reset targets after a global reset or reset-credit
   // action, so quota values are not monotonic client-side invariants.
+  if (!Object.hasOwn(currentProvider, 'creditBalanceStatus') && Object.hasOwn(previousProvider, 'creditBalanceStatus')) {
+    return retainedCodexProvider(previousProvider, currentProvider, currentProvider.windows);
+  }
   return currentProvider;
 }
 
@@ -715,6 +768,43 @@ function carryProviderBalance(winner, loser) {
     ? [...(winner.windows || []), creditsWindow]
     : winner.windows;
   return { ...winner, balance: loser.balance, windows };
+}
+
+function creditBalanceObservation(provider) {
+  if (provider?.provider !== 'codex' || !Object.hasOwn(provider, 'creditBalanceStatus')) return null;
+  return {
+    provider,
+    status: provider.creditBalanceStatus,
+    timestamp: timestampMs(provider.creditBalanceUpdatedAt || provider.updatedAt),
+    updatedAt: timestampMs(provider.updatedAt),
+    deviceId: String(provider.sourceDeviceId || '')
+  };
+}
+
+function betterCreditBalanceObservation(current, candidate) {
+  if (!current) return candidate;
+  if (candidate.timestamp !== current.timestamp) return candidate.timestamp > current.timestamp ? candidate : current;
+  if (candidate.updatedAt !== current.updatedAt) return candidate.updatedAt > current.updatedAt ? candidate : current;
+  return candidate.deviceId.localeCompare(current.deviceId) < 0 ? candidate : current;
+}
+
+// Credit is an account-level observation with freshness independent of quota
+// windows. Merge it separately so a newer unavailable observation clears an
+// older value, while a transient result can retain the last valid value.
+function carryCodexCreditBalance(winner, loser) {
+  const current = creditBalanceObservation(winner);
+  const candidate = creditBalanceObservation(loser);
+  const better = betterCreditBalanceObservation(current, candidate);
+  if (!better || better.provider === winner) return winner;
+  return {
+    ...winner,
+    creditBalance: better.status === 'unavailable' || better.provider.creditBalanceUnlimited === true
+      ? null
+      : better.provider.creditBalance,
+    creditBalanceStatus: better.status,
+    creditBalanceUnlimited: better.status !== 'unavailable' && better.provider.creditBalanceUnlimited === true,
+    creditBalanceUpdatedAt: better.provider.creditBalanceUpdatedAt
+  };
 }
 
 function openCodeWindowKey(window) {
@@ -896,7 +986,8 @@ function mergeOpenCodeProviderComponents(candidates) {
 function pickBetterProvider(current, candidate) {
   if (!current) return candidate;
   const winner = betterProvider(current, candidate);
-  return carryProviderBalance(winner, winner === current ? candidate : current);
+  const loser = winner === current ? candidate : current;
+  return carryCodexCreditBalance(carryProviderBalance(winner, loser), loser);
 }
 
 function betterProvider(current, candidate) {
@@ -1019,6 +1110,7 @@ module.exports = {
   DEFAULT_LIMITS_REFRESH_MS,
   aggregateLimits,
   mergeCodexTransientWindows,
+  normalizeCreditBalance,
   normalizeLimitProvider,
   normalizeLimitsSummary,
   normalizeLimitWindow,

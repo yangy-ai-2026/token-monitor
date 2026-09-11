@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { appVersion } = require('../../appVersion');
-const { normalizeLimitProvider } = require('../../limits/core');
+const { normalizeCreditBalance, normalizeLimitProvider } = require('../../limits/core');
 const { abortError } = require('../../probeDeadline');
 const {
   codexAccountKey,
@@ -267,6 +267,23 @@ function codexResetCreditsSnapshot(payload = {}) {
     || rateLimits.rateLimitResetCredits
     || rateLimits.rate_limit_reset_credits
     || null;
+}
+
+function codexCreditBalanceSnapshot(payload = {}, updatedAt = null) {
+  const rateLimits = codexRateLimitSnapshot(payload);
+  const credits = rateLimits?.credits;
+  if (!credits || typeof credits !== 'object' || Array.isArray(credits)) return null;
+
+  const hasCredits = credits.hasCredits ?? credits.has_credits;
+  const unlimited = credits.unlimited === true;
+  const rawBalance = normalizeCreditBalance(credits.balance);
+  const available = hasCredits !== false && (unlimited || rawBalance !== null);
+  return {
+    creditBalance: available && !unlimited ? rawBalance : null,
+    creditBalanceStatus: available ? 'available' : 'unavailable',
+    creditBalanceUnlimited: available && unlimited,
+    creditBalanceUpdatedAt: updatedAt
+  };
 }
 
 function codexAccessTokenFromAuth(auth) {
@@ -548,6 +565,7 @@ function mapCodexRateLimitsToProvider(payload, meta = {}) {
     status: 'ok',
     updatedAt: meta.updatedAt,
     windows,
+    ...(codexCreditBalanceSnapshot(payload, meta.updatedAt) || {}),
     resetCredits: codexResetCreditsSnapshot(payload)
   });
 }

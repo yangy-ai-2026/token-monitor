@@ -2179,3 +2179,30 @@ test('LimitsRuntime compatibility snapshot probes initially and reuses the confi
   assert.equal(calls, 2);
   collector.stop();
 });
+
+test('Codex rate-limit credits map to the frozen decimal Credit contract', () => {
+  const base = {
+    account: { email: 'credit@example.com', planType: 'plus' },
+    rateLimits: {
+      primary: { usedPercent: 20, resetsAt: '2026-08-01T05:00:00Z', windowDurationMins: 300 },
+      credits: { hasCredits: true, balance: '1498.57' }
+    }
+  };
+  const provider = mapCodexRateLimitsToProvider(base, {
+    accountKey: 'sha256:credit',
+    updatedAt: '2026-08-01T00:00:00.000Z'
+  });
+  assert.equal(provider.creditBalance, '1498.57');
+  assert.equal(provider.creditBalanceStatus, 'available');
+  assert.equal(provider.creditBalanceUnlimited, false);
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T00:00:00.000Z');
+  assert.equal(mapCodexRateLimitsToProvider({ ...base, rateLimits: { credits: { balance: '0' } } }, {
+    updatedAt: '2026-08-01T00:00:00.000Z'
+  }).creditBalance, '0');
+  assert.equal(mapCodexRateLimitsToProvider({ ...base, rateLimits: { credits: { hasCredits: false, balance: '1498.57' } } }).creditBalanceStatus, 'unavailable');
+  assert.equal(mapCodexRateLimitsToProvider({ ...base, rateLimits: { credits: { unlimited: true } } }).creditBalanceUnlimited, true);
+  const malformed = mapCodexRateLimitsToProvider({ ...base, rateLimits: { credits: { balance: '1498.57 USD' } } });
+  assert.equal(malformed.creditBalance, null);
+  assert.equal(malformed.creditBalanceStatus, 'unavailable');
+  assert.equal(Object.hasOwn(mapCodexRateLimitsToProvider({ ...base, rateLimits: {} }), 'creditBalanceStatus'), false);
+});

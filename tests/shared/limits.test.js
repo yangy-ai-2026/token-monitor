@@ -1918,3 +1918,84 @@ test('aggregateLimits never labels a merged OpenCode row Web while a local windo
   assert.equal(provider.windows.length, 2);
   assert.equal(provider.source, 'local');
 });
+
+test('Codex Credit normalization is decimal-string only and fail-closed', () => {
+  const available = normalizeLimitProvider({
+    provider: 'codex',
+    creditBalance: '1498.57',
+    creditBalanceStatus: 'available',
+    creditBalanceUpdatedAt: '2026-08-01T00:00:00Z',
+    windows: []
+  });
+  assert.equal(available.creditBalance, '1498.57');
+  assert.equal(available.creditBalanceStatus, 'available');
+  assert.equal(available.creditBalanceUpdatedAt, '2026-08-01T00:00:00.000Z');
+  assert.equal(normalizeLimitProvider({ provider: 'codex', creditBalance: '0', windows: [] }).creditBalance, '0');
+  const malformed = normalizeLimitProvider({ provider: 'codex', creditBalance: '1,498.57', windows: [] });
+  assert.equal(malformed.creditBalance, null);
+  assert.equal(malformed.creditBalanceStatus, 'unavailable');
+  assert.equal(normalizeLimitProvider({ provider: 'codex', windows: [] }).creditBalanceStatus, undefined);
+});
+
+test('aggregateLimits merges Codex Credit independently, with newest unavailable and stable ties', () => {
+  const accountKey = 'sha256:codex-credit-forward-port';
+  const quotaNewer = {
+    ...codexProvider(accountKey, 'credit@example.com', 80, '2026-08-01T10:05:00.000Z'),
+    creditBalance: '1498.57',
+    creditBalanceStatus: 'available',
+    creditBalanceUpdatedAt: '2026-08-01T10:01:00.000Z'
+  };
+  const creditNewer = {
+    ...codexProvider(accountKey, 'credit@example.com', 60, '2026-08-01T10:00:00.000Z'),
+    creditBalance: '1475.25',
+    creditBalanceStatus: 'available',
+    creditBalanceUpdatedAt: '2026-08-01T10:04:00.000Z'
+  };
+  let aggregate = aggregateLimits([
+    { deviceId: 'desktop', limits: { providers: [quotaNewer] } },
+    { deviceId: 'laptop', limits: { providers: [creditNewer] } }
+  ], 0, Date.parse('2026-08-01T10:06:00.000Z'));
+  let provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.windows[0].remainingPercent, 80);
+  assert.equal(provider.creditBalance, '1475.25');
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T10:04:00.000Z');
+
+  aggregate = aggregateLimits([
+    { deviceId: 'desktop', limits: { providers: [quotaNewer] } },
+    { deviceId: 'laptop', limits: { providers: [{ ...creditNewer, creditBalance: null, creditBalanceStatus: 'unavailable', creditBalanceUpdatedAt: '2026-08-01T10:06:00.000Z' }] } }
+  ], 0, Date.parse('2026-08-01T10:07:00.000Z'));
+  provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'unavailable');
+
+  const tie = aggregateLimits([
+    { deviceId: 'z-device', limits: { providers: [{ ...quotaNewer, updatedAt: '2026-08-01T10:02:00.000Z', creditBalance: '1200.00', creditBalanceUpdatedAt: '2026-08-01T10:01:00.000Z' }] } },
+    { deviceId: 'a-device', limits: { providers: [{ ...creditNewer, updatedAt: '2026-08-01T10:02:00.000Z', creditBalance: '1300.00', creditBalanceUpdatedAt: '2026-08-01T10:01:00.000Z' }] } }
+  ], 0, Date.parse('2026-08-01T10:07:00.000Z'));
+  provider = tie.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.creditBalance, '1300.00');
+});
+
+test('mergeCodexTransientWindows retains a valid Credit value as stale', () => {
+  const accountKey = 'sha256:codex-credit-stale-forward-port';
+  const previous = {
+    providers: [{
+      ...codexProvider(accountKey, 'stale@example.com', 80, '2026-08-01T10:00:00.000Z'),
+      creditBalance: '1498.57',
+      creditBalanceStatus: 'available',
+      creditBalanceUpdatedAt: '2026-08-01T09:59:00.000Z'
+    }]
+  };
+  const current = {
+    providers: [{
+      ...codexProvider(accountKey, 'stale@example.com', 0, '2026-08-01T10:05:00.000Z'),
+      status: 'unavailable',
+      windows: []
+    }]
+  };
+  const merged = mergeCodexTransientWindows(previous, current, Date.parse('2026-08-01T10:05:00.000Z'));
+  const provider = merged.providers[0];
+  assert.equal(provider.creditBalance, '1498.57');
+  assert.equal(provider.creditBalanceStatus, 'stale');
+  assert.equal(provider.windows[0].remainingPercent, 80);
+});
