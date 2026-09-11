@@ -472,6 +472,32 @@ async function withCodexOAuthResetCredits(payload, deps = {}, oauthAuthSnapshot 
   }
 }
 
+function mergeCodexCreditSupplement(payload, rpcPayload) {
+  const sourceCredits = codexRateLimitSnapshot(rpcPayload)?.credits;
+  if (!sourceCredits || typeof sourceCredits !== 'object' || Array.isArray(sourceCredits)) return payload;
+  const credits = {
+    ...(Object.hasOwn(sourceCredits, 'hasCredits') ? { hasCredits: sourceCredits.hasCredits } : {}),
+    ...(Object.hasOwn(sourceCredits, 'has_credits') ? { has_credits: sourceCredits.has_credits } : {}),
+    ...(Object.hasOwn(sourceCredits, 'unlimited') ? { unlimited: sourceCredits.unlimited } : {}),
+    ...(Object.hasOwn(sourceCredits, 'balance') ? { balance: sourceCredits.balance } : {})
+  };
+
+  const direct = codexDirectRateLimits(payload);
+  const rateLimits = { ...direct, credits };
+  const existingById = codexRateLimitsById(payload);
+  const canonical = existingById.codex && typeof existingById.codex === 'object'
+    ? existingById.codex
+    : direct;
+  return {
+    ...payload,
+    rateLimits,
+    rateLimitsByLimitId: {
+      ...existingById,
+      codex: { ...canonical, credits }
+    }
+  };
+}
+
 function codexAccountLabel(payload = {}) {
   return codexPlanLabelFromParts(...codexPlanParts(payload));
 }
@@ -1222,7 +1248,7 @@ async function readCodexUsageOrRpc(deps = {}) {
   const oauthReader = deps.readCodexUsage || fetchCodexUsage;
   const rpcReader = deps.readCodexRpc || readCodexRpc;
   let latestOAuthAuthSnapshot = null;
-  const readOAuth = async () => {
+  const readOAuth = async (creditSupplement = null) => {
     let oauthAuthSnapshot = null;
     try {
       oauthAuthSnapshot = readCodexOAuthAuth(deps);
@@ -1231,8 +1257,19 @@ async function readCodexUsageOrRpc(deps = {}) {
     }
     latestOAuthAuthSnapshot = oauthAuthSnapshot;
     const oauthDeps = oauthAuthSnapshot ? { ...deps, codexOAuthAuthSnapshot: oauthAuthSnapshot } : deps;
+    const oauthPayload = normalizeCodexUsagePayload(await oauthReader(oauthDeps));
+    let payload = oauthPayload;
+    if (creditSupplement !== null) {
+      payload = mergeCodexCreditSupplement(payload, creditSupplement);
+    } else {
+      try {
+        payload = mergeCodexCreditSupplement(payload, await rpcReader(deps));
+      } catch (_) {
+        // Credit is supplemental: OAuth quota remains authoritative when RPC is unavailable.
+      }
+    }
     return {
-      payload: normalizeCodexUsagePayload(await oauthReader(oauthDeps)),
+      payload,
       source: 'oauth',
       sourceDetail: '',
       oauthAuthSnapshot
@@ -1275,7 +1312,7 @@ async function readCodexUsageOrRpc(deps = {}) {
   // recovery-only and the explicitly scoped OAuth request must succeed.
   if (deps.codexAccountId || oauthError?.code === 'CODEX_OAUTH_HTTP_UNAUTHORIZED') {
     try {
-      return await readOAuth();
+      return await readOAuth(rpcPayload);
     } catch (retryError) {
       if (deps.codexAccountId && !managedRpcIsScoped) {
         retryError.codexSource = 'oauth';

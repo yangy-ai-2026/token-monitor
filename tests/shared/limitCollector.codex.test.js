@@ -473,11 +473,15 @@ test('fetchCodexLimits prefers OAuth and applies the managed workspace account h
     readCodexResetCredits: async () => null,
     readCodexRpc: async () => {
       rpcCalls += 1;
-      throw new Error('RPC must not run when OAuth usage succeeds');
+      return {
+        rateLimits: {
+          credits: { hasCredits: true, balance: '1498.57' }
+        }
+      };
     }
   });
 
-  assert.equal(rpcCalls, 0);
+  assert.equal(rpcCalls, 1);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, 'https://chatgpt.com/backend-api/wham/usage');
   assert.equal(requests[0].init.headers.authorization, 'Bearer access-token');
@@ -487,6 +491,8 @@ test('fetchCodexLimits prefers OAuth and applies the managed workspace account h
   assert.equal(providers[0].sourceDetail, 'managed');
   assert.equal(providers[0].accountKey, codexAccountKey('member@example.com', 'workspace-team'));
   assert.equal(providers[0].accountLabel, 'Plus');
+  assert.equal(providers[0].creditBalance, '1498.57');
+  assert.equal(providers[0].creditBalanceStatus, 'available');
   assert.deepEqual(providers[0].windows.map((window) => window.kind), ['session', 'weekly']);
   assert.deepEqual(providers[0].windows.map((window) => window.remainingPercent), [88, 66]);
   assert.deepEqual(providers[0].windows.map((window) => window.windowMinutes), [300, 10080]);
@@ -531,9 +537,90 @@ test('fetchCodexLimits uses stored account_id when the live JWT claim differs', 
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0].init.headers['chatgpt-account-id'], 'workspace-team');
-  assert.equal(rpcCalls, 0);
+  assert.equal(rpcCalls, 1);
   assert.equal(provider.source, 'oauth');
   assert.equal(provider.windows[0].remainingPercent, 92);
+});
+
+test('fetchCodexLimits preserves an OAuth quota while supplementing zero Credit balance', async () => {
+  let rpcCalls = 0;
+  const provider = await fetchCodexLimits({}, {
+    now: () => Date.parse('2026-06-01T00:00:00Z'),
+    env: { PATH: '/usr/bin' },
+    readFileSync: () => JSON.stringify({ tokens: { access_token: 'access-token' } }),
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        rate_limit: {
+          primary_window: { used_percent: 12, reset_at: 1_770_000_000, limit_window_seconds: 18_000 },
+          secondary_window: { used_percent: 34, reset_at: 1_770_500_000, limit_window_seconds: 604_800 }
+        }
+      })
+    }),
+    readCodexResetCredits: async () => null,
+    readCodexRpc: async () => {
+      rpcCalls += 1;
+      return { rateLimits: { credits: { hasCredits: true, balance: '0' } } };
+    }
+  });
+
+  assert.equal(rpcCalls, 1);
+  assert.deepEqual(provider.windows.map((window) => window.usedPercent), [12, 34]);
+  assert.equal(provider.creditBalance, '0');
+  assert.equal(provider.creditBalanceStatus, 'available');
+});
+
+test('fetchCodexLimits marks supplemental Credit unavailable without changing OAuth quota', async () => {
+  for (const credits of [
+    { hasCredits: false, balance: '1498.57' },
+    { unlimited: true },
+    { balance: '1498.57 USD' }
+  ]) {
+    const provider = await fetchCodexLimits({}, {
+      now: () => Date.parse('2026-06-01T00:00:00Z'),
+      env: { PATH: '/usr/bin' },
+      readFileSync: () => JSON.stringify({ tokens: { access_token: 'access-token' } }),
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          rate_limit: {
+            primary_window: { used_percent: 12, reset_at: 1_770_000_000, limit_window_seconds: 18_000 }
+          }
+        })
+      }),
+      readCodexResetCredits: async () => null,
+      readCodexRpc: async () => ({ rateLimits: { credits } })
+    });
+
+    assert.equal(provider.windows[0].usedPercent, 12);
+    assert.equal(provider.creditBalanceStatus, credits.unlimited ? 'available' : 'unavailable');
+    assert.equal(provider.creditBalanceUnlimited, credits.unlimited === true);
+  }
+});
+
+test('fetchCodexLimits keeps OAuth quota when the supplemental Credit RPC fails', async () => {
+  const provider = await fetchCodexLimits({}, {
+    now: () => Date.parse('2026-06-01T00:00:00Z'),
+    env: { PATH: '/usr/bin' },
+    readFileSync: () => JSON.stringify({ tokens: { access_token: 'access-token' } }),
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        rate_limit: {
+          primary_window: { used_percent: 12, reset_at: 1_770_000_000, limit_window_seconds: 18_000 }
+        }
+      })
+    }),
+    readCodexResetCredits: async () => null,
+    readCodexRpc: async () => { throw new Error('RPC timeout'); }
+  });
+
+  assert.equal(provider.status, 'ok');
+  assert.equal(provider.windows[0].usedPercent, 12);
+  assert.equal(Object.hasOwn(provider, 'creditBalanceStatus'), false);
 });
 
 test('fetchCodexLimits adds official FedRAMP routing for the claimed workspace', async () => {

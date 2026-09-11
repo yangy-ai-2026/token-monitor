@@ -110,3 +110,39 @@ test('sync payload keeps retained public status/windows and drops runtime-only p
   assert.equal(Object.hasOwn(provider, 'credentialDigest'), false);
   assert.equal(Object.hasOwn(provider, 'revision'), false);
 });
+
+test('sync payload and Node/Worker hub normalization preserve Codex Credit fields', () => {
+  const summary = {
+    deviceId: 'device-credit',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    today: period(10),
+    month: period(20),
+    allTime: period(30),
+    limits: {
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      refreshMs: 300000,
+      providers: [{
+        provider: 'codex',
+        status: 'ok',
+        accountKey: 'account-credit',
+        windows: [{ kind: 'session', usedPercent: 40 }],
+        creditBalance: '1498.57',
+        creditBalanceStatus: 'available',
+        creditBalanceUnlimited: false,
+        creditBalanceUpdatedAt: '2026-08-01T00:00:00.000Z'
+      }]
+    }
+  };
+  const payload = syncPayload(summary);
+  const expected = payload.limits.providers[0];
+  for (const provider of [
+    expected,
+    normalizeDeviceRecord(payload).limits.providers[0],
+    workerUsage.normalizeDeviceRecord(payload).limits.providers[0]
+  ]) {
+    assert.equal(provider.creditBalance, '1498.57');
+    assert.equal(provider.creditBalanceStatus, 'available');
+    assert.equal(provider.creditBalanceUnlimited, false);
+    assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T00:00:00.000Z');
+  }
+});
