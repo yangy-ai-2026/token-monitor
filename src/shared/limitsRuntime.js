@@ -145,6 +145,14 @@ function publicAttemptStatus(status) {
   return status === 'timeout' ? 'error' : status || 'unavailable';
 }
 
+function staleCreditBalance(row, status) {
+  if (!row || !TRANSIENT_STATUSES.has(status) || !Object.hasOwn(row, 'creditBalanceStatus')) return row;
+  return {
+    ...row,
+    creditBalanceStatus: row.creditBalanceStatus === 'unavailable' ? 'unavailable' : 'stale'
+  };
+}
+
 function bypassesProviderCooldown(reason) {
   return COOLDOWN_BYPASS_REASONS.has(String(reason || ''));
 }
@@ -318,7 +326,7 @@ function createLimitsRuntime(initialOptions = {}, deps = {}) {
       if (!attempt) continue;
       const status = publicAttemptStatus(attempt.status);
       const row = state.lastGood
-        ? normalizeLimitProvider({ ...state.lastGood, status })
+        ? normalizeLimitProvider({ ...staleCreditBalance(state.lastGood, status), status })
         : normalizeLimitProvider({
             ...(attempt.row || {}),
             provider,

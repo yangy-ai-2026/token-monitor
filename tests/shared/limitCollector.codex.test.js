@@ -143,6 +143,84 @@ test('Codex provider preserves source detail for renderer labels', () => {
   assert.equal(provider.accountEmail, 'user@example.com');
 });
 
+test('Codex provider maps native app-server credits without changing quota windows', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { email: 'user@example.com', planType: 'plus' },
+    rateLimits: {
+      primary: { usedPercent: 12, resetsAt: '2026-06-01T05:00:00Z', windowDurationMins: 300 },
+      secondary: { usedPercent: 34, resetsAt: '2026-06-07T00:00:00Z', windowDurationMins: 10080 },
+      credits: { hasCredits: true, unlimited: false, balance: '1498.57' }
+    }
+  }, {
+    source: 'rpc',
+    sourceDetail: 'app',
+    updatedAt: '2026-06-01T00:00:00Z'
+  });
+
+  assert.deepEqual(provider.windows.map((window) => window.remainingPercent), [88, 66]);
+  assert.equal(provider.creditBalance, '1498.57');
+  assert.equal(provider.creditBalanceStatus, 'available');
+  assert.equal(provider.creditBalanceUnlimited, false);
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-06-01T00:00:00.000Z');
+  assert.equal(provider.balance, null);
+  assert.equal(provider.balanceUsd, null);
+});
+
+test('Codex provider treats hasCredits=false as unavailable instead of zero', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { email: 'user@example.com', planType: 'plus' },
+    rateLimits: {
+      primary: { usedPercent: 12, windowDurationMins: 300 },
+      credits: { hasCredits: false, unlimited: false, balance: '0' }
+    }
+  }, { updatedAt: '2026-06-01T00:00:00Z' });
+
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'unavailable');
+  assert.equal(provider.creditBalanceUnlimited, false);
+  assert.equal(provider.windows[0].remainingPercent, 88);
+});
+
+test('Codex provider represents unlimited credits without inventing a balance', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { email: 'user@example.com', planType: 'plus' },
+    rateLimits: {
+      primary: { usedPercent: 12, windowDurationMins: 300 },
+      credits: { hasCredits: true, unlimited: true }
+    }
+  }, { updatedAt: '2026-06-01T00:00:00Z' });
+
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'available');
+  assert.equal(provider.creditBalanceUnlimited, true);
+});
+
+test('Codex provider leaves the native credit contract absent when credits are missing', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { email: 'user@example.com', planType: 'plus' },
+    rateLimits: { primary: { usedPercent: 12, windowDurationMins: 300 } }
+  }, { updatedAt: '2026-06-01T00:00:00Z' });
+
+  assert.equal(Object.hasOwn(provider, 'creditBalance'), false);
+  assert.equal(Object.hasOwn(provider, 'creditBalanceStatus'), false);
+  assert.equal(provider.windows[0].remainingPercent, 88);
+});
+
+test('Codex provider fails closed for malformed native credit balances', () => {
+  const provider = mapCodexRateLimitsToProvider({
+    account: { email: 'user@example.com', planType: 'plus' },
+    rateLimits: {
+      primary: { usedPercent: 12, windowDurationMins: 300 },
+      credits: { hasCredits: true, unlimited: false, balance: '1498.57USD' }
+    }
+  }, { updatedAt: '2026-06-01T00:00:00Z' });
+
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'unavailable');
+  assert.equal(provider.creditBalanceUnlimited, false);
+  assert.equal(provider.windows[0].remainingPercent, 88);
+});
+
 test('Codex provider reads quota windows from alternate rate limit ids', () => {
   const provider = mapCodexRateLimitsToProvider({
     account: { email: 'user@example.com', planType: 'plus' },
@@ -1499,6 +1577,36 @@ test('LimitsRuntime compatibility keeps retries demand-driven instead of startin
 
   await collector.snapshot(true);
   assert.equal(scheduledTimers, 0);
+  collector.stop();
+});
+
+test('LimitsRuntime compatibility marks retained Codex native credit stale after a transient failure', async () => {
+  const collector = createLimitsCollector({
+    limitProviders: ['codex'],
+    previousLimits: {
+      providers: [{
+        ...codexProvider('sha256:codex-a', 'a@example.com', 50, '2026-06-14T10:00:00.000Z'),
+        creditBalance: '1498.57',
+        creditBalanceStatus: 'available',
+        creditBalanceUnlimited: false,
+        creditBalanceUpdatedAt: '2026-06-14T09:59:00.000Z'
+      }]
+    }
+  }, {
+    now: () => Date.parse('2026-06-14T10:05:00.000Z'),
+    providerFetchers: {
+      codex: async () => {
+        throw Object.assign(new Error('app-server timeout'), { status: 'unavailable' });
+      }
+    }
+  });
+
+  const snapshot = await collector.snapshot(true);
+  const provider = snapshot.providers.find((row) => row.provider === 'codex');
+  assert.equal(provider.status, 'unavailable');
+  assert.equal(provider.creditBalance, '1498.57');
+  assert.equal(provider.creditBalanceStatus, 'stale');
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-06-14T09:59:00.000Z');
   collector.stop();
 });
 

@@ -6,6 +6,7 @@ const test = require('node:test');
 const { createDeviceState } = require('../../src/shared/deviceState');
 const { syncPayload } = require('../../src/shared/syncPayload');
 const { mergeDeviceRecord, normalizeDeviceRecord } = require('../../src/shared/usage');
+const workerLimits = require('../../worker/src/shared/limits');
 const workerUsage = require('../../worker/src/shared/usage');
 
 function period(tokens) {
@@ -109,4 +110,34 @@ test('sync payload keeps retained public status/windows and drops runtime-only p
   assert.equal(Object.hasOwn(provider, 'error'), false);
   assert.equal(Object.hasOwn(provider, 'credentialDigest'), false);
   assert.equal(Object.hasOwn(provider, 'revision'), false);
+});
+
+test('Node and Worker preserve the native Codex Credit wire contract', () => {
+  const record = {
+    deviceId: 'device-1',
+    limits: {
+      updatedAt: '2026-07-21T01:01:00.000Z',
+      providers: [{
+        provider: 'codex',
+        accountKey: 'sha256:codex-credit',
+        status: 'ok',
+        creditBalance: '1498.57',
+        creditBalanceStatus: 'available',
+        creditBalanceUnlimited: false,
+        creditBalanceUpdatedAt: '2026-07-21T01:00:00.000Z',
+        windows: [{ kind: 'session', usedPercent: 40 }]
+      }]
+    }
+  };
+  const nodeProvider = normalizeDeviceRecord(record).limits.providers[0];
+  const workerProvider = workerUsage.normalizeDeviceRecord(record).limits.providers[0];
+  const workerNormalized = workerLimits.normalizeLimitsSummary(record.limits).providers[0];
+
+  assert.deepEqual(
+    [nodeProvider.creditBalance, nodeProvider.creditBalanceStatus, nodeProvider.creditBalanceUnlimited, nodeProvider.creditBalanceUpdatedAt],
+    ['1498.57', 'available', false, '2026-07-21T01:00:00.000Z']
+  );
+  assert.deepEqual(workerProvider, nodeProvider);
+  assert.deepEqual(workerNormalized, nodeProvider);
+  assert.equal(syncPayload(record).limits.providers[0].creditBalance, '1498.57');
 });

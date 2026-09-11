@@ -209,6 +209,116 @@ test('aggregateLimits dedupes same-email Personal and Team workspaces independen
   assert.ok(codexProviders.every((provider) => provider.sourceDeviceId === 'desktop'));
 });
 
+test('aggregateLimits merges Codex Credit by its own observation timestamp', () => {
+  const accountKey = 'sha256:codex-credit';
+  const aggregate = aggregateLimits([
+    {
+      deviceId: 'desktop',
+      limits: {
+        providers: [{
+          ...codexProvider(accountKey, 'credit@example.com', 80, '2026-08-01T10:05:00.000Z'),
+          creditBalance: '1498.57',
+          creditBalanceStatus: 'available',
+          creditBalanceUpdatedAt: '2026-08-01T10:01:00.000Z'
+        }]
+      }
+    },
+    {
+      deviceId: 'laptop',
+      limits: {
+        providers: [{
+          ...codexProvider(accountKey, 'credit@example.com', 60, '2026-08-01T10:00:00.000Z'),
+          creditBalance: '1475.25',
+          creditBalanceStatus: 'available',
+          creditBalanceUpdatedAt: '2026-08-01T10:04:00.000Z'
+        }]
+      }
+    }
+  ], 0, Date.parse('2026-08-01T10:06:00.000Z'));
+
+  const provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.windows[0].remainingPercent, 80);
+  assert.equal(provider.creditBalance, '1475.25');
+  assert.equal(provider.creditBalanceStatus, 'available');
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T10:04:00.000Z');
+});
+
+test('aggregateLimits lets a newer explicit unavailable Credit observation clear an older value', () => {
+  const accountKey = 'sha256:codex-credit-unavailable';
+  const aggregate = aggregateLimits([
+    {
+      deviceId: 'desktop',
+      limits: {
+        providers: [{
+          ...codexProvider(accountKey, 'credit@example.com', 80, '2026-08-01T10:00:00.000Z'),
+          creditBalance: '1498.57',
+          creditBalanceStatus: 'available',
+          creditBalanceUpdatedAt: '2026-08-01T10:00:00.000Z'
+        }]
+      }
+    },
+    {
+      deviceId: 'laptop',
+      limits: {
+        providers: [{
+          ...codexProvider(accountKey, 'credit@example.com', 60, '2026-08-01T10:03:00.000Z'),
+          creditBalance: null,
+          creditBalanceStatus: 'unavailable',
+          creditBalanceUpdatedAt: '2026-08-01T10:03:00.000Z'
+        }]
+      }
+    }
+  ], 0, Date.parse('2026-08-01T10:04:00.000Z'));
+
+  const provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'unavailable');
+  assert.equal(provider.creditBalanceUnlimited, false);
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T10:03:00.000Z');
+});
+
+test('aggregateLimits keeps a stale Credit value when a transient observation is retained', () => {
+  const accountKey = 'sha256:codex-credit-stale';
+  const aggregate = aggregateLimits([{
+    deviceId: 'desktop',
+    limits: {
+      providers: [{
+        ...codexProvider(accountKey, 'credit@example.com', 80, '2026-08-01T10:00:00.000Z'),
+        creditBalance: '1498.57',
+        creditBalanceStatus: 'stale',
+        creditBalanceUpdatedAt: '2026-08-01T09:59:00.000Z'
+      }]
+    }
+  }], 0, Date.parse('2026-08-01T10:04:00.000Z'));
+
+  const provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.creditBalance, '1498.57');
+  assert.equal(provider.creditBalanceStatus, 'stale');
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-08-01T09:59:00.000Z');
+});
+
+test('aggregateLimits resolves equal Credit timestamps with a stable device id tie-break', () => {
+  const accountKey = 'sha256:codex-credit-tie';
+  const providerFor = (deviceId, balance) => ({
+    deviceId,
+    limits: {
+      providers: [{
+        ...codexProvider(accountKey, 'credit@example.com', 80, '2026-08-01T10:00:00.000Z'),
+        creditBalance: balance,
+        creditBalanceStatus: 'available',
+        creditBalanceUpdatedAt: '2026-08-01T10:00:00.000Z'
+      }]
+    }
+  });
+  const aggregate = aggregateLimits([
+    providerFor('zeta', '1200.00'),
+    providerFor('alpha', '1300.00')
+  ], 0, Date.parse('2026-08-01T10:01:00.000Z'));
+
+  const provider = aggregate.providers.find((entry) => entry.accountKey === accountKey);
+  assert.equal(provider.creditBalance, '1300.00');
+});
+
 test('aggregateLimits preserves distinct MiMo accounts by hashed account key', () => {
   const aggregate = aggregateLimits([
     {
@@ -600,6 +710,69 @@ test('mergeCodexTransientWindows keeps recent Codex windows across a transient r
   assert.equal(merged.providers[0].updatedAt, '2026-06-14T10:00:00.000Z');
 });
 
+test('mergeCodexTransientWindows retains a successful native credit as stale after a transient failure', () => {
+  const previous = {
+    updatedAt: '2026-06-14T10:00:00.000Z',
+    providers: [{
+      ...codexProvider('sha256:codex-a', 'a@example.com', 50, '2026-06-14T10:00:00.000Z'),
+      creditBalance: '1498.57',
+      creditBalanceStatus: 'available',
+      creditBalanceUnlimited: false,
+      creditBalanceUpdatedAt: '2026-06-14T09:59:00.000Z'
+    }]
+  };
+  const current = {
+    updatedAt: '2026-06-14T10:05:00.000Z',
+    providers: [{
+      provider: 'codex',
+      accountKey: 'sha256:codex-a',
+      accountEmail: 'a@example.com',
+      status: 'unavailable',
+      updatedAt: '2026-06-14T10:05:00.000Z',
+      windows: []
+    }]
+  };
+
+  const merged = mergeCodexTransientWindows(previous, current, Date.parse('2026-06-14T10:05:00.000Z'));
+
+  assert.equal(merged.providers[0].creditBalance, '1498.57');
+  assert.equal(merged.providers[0].creditBalanceStatus, 'stale');
+  assert.equal(merged.providers[0].creditBalanceUpdatedAt, '2026-06-14T09:59:00.000Z');
+});
+
+test('normalizeLimitProvider preserves native credit decimal strings without money conversion', () => {
+  const provider = normalizeLimitProvider({
+    provider: 'codex',
+    status: 'ok',
+    creditBalance: '999999999999999999999999.0001',
+    creditBalanceStatus: 'available',
+    creditBalanceUnlimited: false,
+    creditBalanceUpdatedAt: '2026-06-14T10:00:00Z',
+    balance: { amount: 42, currency: 'USD' }
+  });
+
+  assert.equal(provider.creditBalance, '999999999999999999999999.0001');
+  assert.equal(provider.creditBalanceStatus, 'available');
+  assert.equal(provider.creditBalanceUpdatedAt, '2026-06-14T10:00:00.000Z');
+  assert.equal(provider.balance.amount, 42);
+});
+
+test('normalizeLimitProvider rejects malformed native credit values without affecting quota status', () => {
+  const provider = normalizeLimitProvider({
+    provider: 'codex',
+    status: 'ok',
+    creditBalance: 1498.57,
+    creditBalanceStatus: 'available',
+    creditBalanceUpdatedAt: '2026-06-14T10:00:00Z',
+    windows: [{ kind: 'session', usedPercent: 25 }]
+  });
+
+  assert.equal(provider.creditBalance, null);
+  assert.equal(provider.creditBalanceStatus, 'unavailable');
+  assert.equal(provider.status, 'ok');
+  assert.equal(provider.windows[0].remainingPercent, 75);
+});
+
 test('mergeCodexTransientWindows does not hide a real Codex sign-out', () => {
   const previous = {
     updatedAt: '2026-06-14T10:00:00.000Z',
@@ -803,6 +976,23 @@ test('syncLimits carries Codex account identity and legacy plan label to the aut
       '2026-07-19T01:00:00.000Z'
     ]
   });
+});
+
+test('syncLimits carries native Codex Credit without converting its decimal string', () => {
+  const payload = syncLimits({
+    providers: [{
+      ...codexProvider('sha256:codex-credit', 'credit@example.com', 18, '2026-06-14T10:00:00.000Z'),
+      creditBalance: '999999999999999999999999.0001',
+      creditBalanceStatus: 'available',
+      creditBalanceUnlimited: false,
+      creditBalanceUpdatedAt: '2026-06-14T09:59:00.000Z'
+    }]
+  });
+
+  assert.equal(payload.providers[0].creditBalance, '999999999999999999999999.0001');
+  assert.equal(payload.providers[0].creditBalanceStatus, 'available');
+  assert.equal(payload.providers[0].creditBalanceUnlimited, false);
+  assert.equal(payload.providers[0].creditBalanceUpdatedAt, '2026-06-14T09:59:00.000Z');
 });
 
 test('publicLimits strips Codex account identity fields', () => {

@@ -10,6 +10,7 @@ const { BROWSER_USER_AGENT } = require('./browserUserAgent');
 const { LIMIT_PROVIDER_IDS } = require('./limitProviders');
 const {
   DEFAULT_LIMITS_REFRESH_MS,
+  normalizeCreditBalance,
   normalizeLimitProvider,
   normalizeLimitsSummary,
   openCodeWindowKey
@@ -2194,6 +2195,23 @@ function codexResetCreditsSnapshot(payload = {}) {
     || null;
 }
 
+function codexCreditBalanceSnapshot(payload = {}, updatedAt = null) {
+  const rateLimits = codexRateLimitSnapshot(payload);
+  const credits = rateLimits?.credits;
+  if (!credits || typeof credits !== 'object' || Array.isArray(credits)) return null;
+
+  const hasCredits = credits.hasCredits ?? credits.has_credits;
+  const unlimited = credits.unlimited === true;
+  const rawBalance = normalizeCreditBalance(credits.balance);
+  const available = hasCredits !== false && (unlimited || rawBalance !== null);
+  return {
+    creditBalance: available && !unlimited ? rawBalance : null,
+    creditBalanceStatus: available ? 'available' : 'unavailable',
+    creditBalanceUnlimited: available && unlimited,
+    creditBalanceUpdatedAt: updatedAt
+  };
+}
+
 function codexAccessTokenFromAuth(auth) {
   const tokens = auth?.tokens || auth || {};
   return String(tokens.access_token || auth?.access_token || '').trim();
@@ -2473,6 +2491,7 @@ function mapCodexRateLimitsToProvider(payload, meta = {}) {
     status: 'ok',
     updatedAt: meta.updatedAt,
     windows,
+    ...(codexCreditBalanceSnapshot(payload, meta.updatedAt) || {}),
     resetCredits: codexResetCreditsSnapshot(payload)
   });
 }
