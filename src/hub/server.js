@@ -219,7 +219,7 @@ function createHub({
       try {
         const payload = await readJsonBody(req);
         const record = ingest(payload);
-        return sendJson(res, 200, { ok: true, deviceId: record.deviceId, stats: getStats() });
+        return sendJson(res, 200, { ok: true, deviceId: record.deviceId });
       } catch (error) {
         if (error.message === 'deviceId_required') return sendJson(res, 400, { error: 'deviceId_required' });
         if (error.code === 'payload_too_large') {

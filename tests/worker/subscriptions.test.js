@@ -38,6 +38,14 @@ function request(method, body) {
   });
 }
 
+function ingestRequest(body) {
+  return new Request('https://hub.example/api/ingest', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer shh' },
+    body: JSON.stringify(body)
+  });
+}
+
 test('the Worker health response exposes its content-derived build identity', async () => {
   const { hub } = await hubDO();
   const response = await hub.fetch(new Request('https://hub.example/api/health'));
@@ -47,6 +55,25 @@ test('the Worker health response exposes its content-derived build identity', as
   assert.equal(health.hubBuild.runtime, 'cloudflare-worker');
   assert.match(health.hubBuild.coreBuildId, /^sha256:[a-f0-9]{64}$/);
   assert.match(health.hubBuild.runtimeBuildId, /^sha256:[a-f0-9]{64}$/);
+});
+
+test('Worker ingest returns a lightweight acknowledgement and broadcasts stats', async () => {
+  const { hub, state } = await hubDO();
+  const reasons = [];
+  hub.broadcast = async (reason) => { reasons.push(reason); };
+
+  const response = await hub.fetch(ingestRequest({
+    deviceId: 'worker-ack-device',
+    today: { totalTokens: 7 }
+  }));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.deviceId, 'worker-ack-device');
+  assert.equal('stats' in body, false);
+  assert.equal(state.map.get('dev:worker-ack-device').deviceId, 'worker-ack-device');
+  assert.deepEqual(reasons, ['ingest']);
 });
 
 const RECORD = {

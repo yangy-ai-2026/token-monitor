@@ -248,6 +248,40 @@ test('ingest accepts payloads above the legacy 256 KiB limit', async () => {
   }
 });
 
+test('ingest returns a lightweight acknowledgement and keeps the SSE broadcast', async () => {
+  const dataFile = tempDataFile();
+  const hub = createHub({ port: 0, host: '127.0.0.1', secret: '', dataFile, logger: { error() {} } });
+  await hub.start();
+  const decoder = new TextDecoder();
+  let reader;
+  try {
+    const { port } = hub.server.address();
+    const stream = await fetch(`http://127.0.0.1:${port}/api/stats/stream`);
+    assert.equal(stream.status, 200);
+    reader = stream.body.getReader();
+    const initial = await reader.read();
+    assert.match(decoder.decode(initial.value), /event: snapshot/);
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: 'ack-device', today: { totalTokens: 1 } })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.deviceId, 'ack-device');
+    assert.equal('stats' in body, false);
+
+    const broadcast = await reader.read();
+    assert.match(decoder.decode(broadcast.value), /event: stats/);
+  } finally {
+    await reader?.cancel();
+    await hub.stop();
+    fs.rmSync(dataFile, { force: true });
+  }
+});
+
 test('the hub stores one shared subscription list, not one per device', async () => {
   const dataFile = tempDataFile();
   const hub = createHub({ port: 0, host: '127.0.0.1', secret: 'shh', dataFile, logger: { error() {}, warn() {} } });

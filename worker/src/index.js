@@ -234,7 +234,7 @@ export class HubDO {
       const record = mergeDeviceRecord(existing, { ...payload, receivedAt: new Date().toISOString() });
       await this.state.storage.put(`dev:${record.deviceId}`, record);
       this.broadcast('ingest').catch(() => {});
-      return jsonResponse(200, { ok: true, deviceId: record.deviceId, stats: await this.statsWithSubscriptionVersion() });
+      return jsonResponse(200, { ok: true, deviceId: record.deviceId });
     }
 
     // Shared by every device on this hub rather than owned by one of them, and
