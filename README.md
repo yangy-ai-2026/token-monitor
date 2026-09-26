@@ -254,6 +254,41 @@ Mode B — Sync (opt-in, multi-device)
 
 The widget chooses local vs sync mode based on Settings → Multi-device Sync. The hub itself can run as a separate `npm run hub` process, a Cloudflare Worker, or directly inside one of the widgets (Host mode). In sync mode the hub pushes aggregated stats to every connected widget over Server-Sent Events, so updates on one device appear on the others within a few seconds.
 
+## Token Monitor Traffic Incident
+
+Status: CLOSED
+
+Root Cause:
+
+- `collectionMode=live`
+- `syncUploadIntervalMs=0`
+- high-frequency ingest
+- duplicate full stats downstream through SSE + ingest response
+
+Fix:
+
+- `syncUploadIntervalMs = 600000`
+- `/api/ingest` lightweight acknowledgement
+- `STALE_AFTER_MS = 1800000`
+- canonical runtime = `win-unpacked-credit-v055`
+
+Verification:
+
+- traffic amplification runtime gate PASS
+- Credits PASS
+- Weekly PASS
+- production Worker PASS
+- stale threshold production verification PASS
+
+Production Worker: `token-monitor-hub-yangy`
+
+Active version: `0e4e1d6d-1213-4283-b30a-2634c0281867`
+
+Deferred:
+
+- exact-host DIRECT bypass
+- reason: direct TCP/TLS to `workers.dev` unavailable on current network
+
 ## Session data retention
 
 With **Preserve deleted session usage** enabled (Settings → Collection), Token Monitor archives observed daily tool/model usage locally with no time limit — so even after a source tool prunes its own sessions, the heatmap and trends are unaffected.
